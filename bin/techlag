@@ -22,72 +22,49 @@
 #
 
 import argparse
-import logging
 import sys
 
-from techlag.techlag import TechLag
+from techlag.techlag import find_backends
+from techlag import backends
+
+TECHLAG_USAGE_MSG = \
+"""%(prog)s [-g] <backend> [<args>] | --help | --version"""
 
 
-def get_params_parser():
-    """Parse command line arguments
+def parse_args():
+    """Parse command line arguments"""
 
-    Valid arguments are:
-        -h, --help: summary about how to use the tool
-        -p, --package: package name
-        -v, --version: package version
-        -k, --kind: target dependencies kind: devDependencies or dependencies
-        -j, --json: package.json URI
-    """
-
-    parser = argparse.ArgumentParser(usage='',
+    parser = argparse.ArgumentParser(usage=TECHLAG_USAGE_MSG,
                                      description='',
                                      epilog='',
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      add_help=False)
 
-    parser.add_argument('-h', '--help', action='help', help=argparse.SUPPRESS)
-    parser.add_argument('-p', '--package', dest='package', help="package name")
-    parser.add_argument('-v', '--version', dest='version', help="package version or constraint")
-    parser.add_argument('-k', '--kind', dest='kind', help="target dependencies kind: devDependencies or dependencies")
-    parser.add_argument('-j', '--json', dest='pjson', help="package.json URL")
+    parser.add_argument('-h', '--help', action='help',
+                        help=argparse.SUPPRESS)
+
+    parser.add_argument('backend', help=argparse.SUPPRESS)
+    parser.add_argument('backend_args', nargs=argparse.REMAINDER,
+                        help=argparse.SUPPRESS)
 
     if len(sys.argv) == 1:
         parser.print_help()
         sys.exit(1)
 
-    return parser
-
-
-def get_params():
-
-    parser = get_params_parser()
-    args = parser.parse_args()
-
-    msg = "Please enter one of the following commands:\n" \
-          "(1) --package <p> --version <v> --kind <k>,\n" \
-          "(2) --json <package.json path> --kind <k>,\n" \
-          "(3) --help"
-
-    if args.pjson and args.kind:
-        if args.package or args.version:
-            logging.error(msg)
-            sys.exit(1)
-    elif args.package and args.version and args.kind:
-        if args.pjson:
-            logging.error(msg)
-            sys.exit(1)
-
-    return args
+    return parser.parse_args()
 
 
 def main():
-    args = get_params()
+    args = parse_args()
 
-    try:
-        tl = TechLag(args.package, args.version, args.kind, args.pjson)
-        tl.analyze()
-    except Exception as e:
-        logging.error(e, exc_info=True)
+    _, TECHLAG_CMDS = find_backends(backends)
+
+    if args.backend not in TECHLAG_CMDS:
+        raise RuntimeError("Unknown backend %s" % args.backend)
+
+    klass = TECHLAG_CMDS[args.backend]
+    cmd = klass(*args.backend_args)
+    cmd.run()
 
 
 if __name__ == '__main__':
