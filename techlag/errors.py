@@ -42,3 +42,9 @@ class ParamsError(BaseError):
     """Generic error for params errors"""
 
     message = "%(cause)s"
+
+
+class TechLagError(BaseError):
+    """Generic error for TechLag errors"""
+
+    message = "%(cause)s"

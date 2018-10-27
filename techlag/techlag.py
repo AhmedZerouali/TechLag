@@ -21,13 +21,17 @@
 #     Valerio Cosentino <valcos@bitergia.com>
 #
 
+import argparse
+import importlib
+import inspect
 import logging
-import pandas as pd
+import pkgutil
+import re
 import requests
 import subprocess
 import warnings
 
-from .errors import ParamsError
+from techlag.errors import TechLagError
 
 warnings.simplefilter(action='ignore', category=Warning)
 
@@ -35,208 +39,55 @@ RELEASE_MINOR = 'minor'
 RELEASE_MAJOR = 'major'
 RELEASE_PATCH = 'patch'
 
-DEPENDENCIES_KIND = "dependencies"
-DEV_DEPENDENCIES_KIND = "devDependencies"
-
-DEPENDENCIES = [DEPENDENCIES_KIND, DEV_DEPENDENCIES_KIND]
+logger = logging.getLogger(__name__)
 
 
 class TechLag:
-    """Techlag, a tool to calculate the technical lag of your javascript package.
-
-    The tool can be executed in two ways, either:
-        - the package name, version and kind of dependencies to analyze
-        - the URI of a package.json plus the kind of dependencies to analyze
-
-    Possible examples of executions are:
-        - TechLag(pjson=https://raw.githubusercontent.com/jasmine/jasmine/master/package.json,
-                  kind='devDependencies")
-        - TechLag(package="grunt", version="1.0.0", kind="dependencies")
+    """Abstract class for technical lag backends.
 
     :param package: target package name
     :param version: the target package version
-    :param kind: kind of dependencies to analyze
-    :param pjson: valid package.json URI
+    :param url: the URL of the package to analyze
     """
 
-    version = '0.1.0'
+    version = '0.2.0'
 
-    def __init__(self, package=None, version=None, kind=None, pjson=None):
-        if not kind:
-            raise ParamsError(cause="kind of dependencies cannot be null")
-
-        if package and version and kind:
-            if pjson:
-                raise ParamsError(cause="too many parameters passed")
-
-        if pjson and kind:
-            if package or version:
-                raise ParamsError(cause="too many parameters passed")
-
-        if kind not in DEPENDENCIES:
-            logging.warning("Unknown kind dep ..., set it to %s", DEPENDENCIES_KIND)
-            kind = DEPENDENCIES_KIND
-
+    def __init__(self, package=None, version=None, url=None):
         self.package = package
         self.version = version
-        self.kind = kind
-        self.pjson = pjson
+        self.url = url
 
     def analyze(self):
         """Calculate the technical lag for the target package"""
 
-        if self.pjson:
-            json = TechLag.parse_url(self.pjson)
-            dependencies = (pd.DataFrame({'dependency': list(json[self.kind].keys()),
-                                          'constraint': list(json[self.kind].values()),
-                                          'kind': self.kind})
-                            )
-        else:
-            version = self.semver(self.version, self.get_versions(self.package).version.tolist())
-            dependencies = self.get_dependencies(self.package, version, self.kind)
-
-        result = self.calculate_lags(dependencies)
-        return result
+        raise NotImplementedError
 
     @staticmethod
-    def get_dependencies(package, version, kind):
-        """Fetch the dependencies of a given type for a target version of a package.
-
-        :param package: target package name
-        :param version: the target package version
-        :param kind: kind of dependencies to analyze
-
-        :return: a pandas data frame with the dependencies
-        """
-
-        json = TechLag.parse_url('http://registry.npmjs.org/' + package + '/' + version)
-        dependencies = (pd.DataFrame({'dependency': list(json[kind].keys()),
-                                      'constraint': list(json[kind].values()),
-                                      'kind': kind}))
-
-        return dependencies
-
-    def semver(self, constraint, versions):
+    def semver(constraint, versions):
         """Get the semantic version of a package.
 
         :param constraint: version constraint
         :param versions: list package versions
 
-        :return: the semantic version of the package
+        :return: package versions that meet the constraint
         """
-
         args = ['semver', '-r', constraint] + list(versions)
 
-        completed = subprocess.run(args, stdout=subprocess.PIPE)
-        if completed.returncode == 0:
-            return completed.stdout.decode().strip().split('\n')[-1]
-        else:
-            return ''
-
-    @staticmethod
-    def get_versions(package):
-        """Get the version of a given package.
-
-        :param package: target package name
-
-        :return: pandas data frame of package versions
-        """
-
-        versions = TechLag.parse_url('http://registry.npmjs.org/' + package)['time']
-        versions.pop('modified')
-        versions.pop('created')
-        versions = (pd.DataFrame({'version': list(versions.keys()),
-                                  'date': list(versions.values()),
-                                  'package': package}))
-
-        return versions
-
-    def calculate_lags(self, dependencies):
-        """Calculate technical lag for a list of dependencies.
-
-        :param dependencies: pandas data frame of package dependencies
-
-        :return: the dependencies with the corresponding technical lag
-        """
-
-        dependencies['used_version'] = ''
-        dependencies['latest_version'] = ''
-        dependencies[RELEASE_MAJOR + '_lag'] = ''
-        dependencies[RELEASE_MINOR + '_lag'] = ''
-        dependencies[RELEASE_PATCH + '_lag'] = ''
-
-        for row in range(0, len(dependencies)):
-            list_versions = self.get_versions(dependencies.iloc[row].dependency)
-
-            latest = self.semver('*', list_versions.version.tolist())
-            used = self.semver(dependencies.iloc[row].constraint, list_versions.version.tolist())
-
-            lag = self.compute_lag(list_versions, used, latest)
-
-            dependencies.latest_version.iloc[row] = latest
-            dependencies.used_version.iloc[row] = used
-            dependencies.major_lag.iloc[row] = lag[RELEASE_MAJOR]
-            dependencies.minor_lag.iloc[row] = lag[RELEASE_MINOR]
-            dependencies.patch_lag.iloc[row] = lag[RELEASE_PATCH]
-
-        return dependencies
-
-    @staticmethod
-    def compute_lag(versions, used, latest):
-        """Compute the technical lag for the set of versions of a given package.
-
-        :param versions: pandas data frame of the package versions
-        :param used: version in use of the package
-        :param latest: latest version available of the package
-
-        :return: the technical lag
-        """
-        used = TechLag.convert_version(used.split('-')[0])
-        latest = TechLag.convert_version(latest.split('-')[0])
-
-        if used == latest:
-            return {RELEASE_MAJOR: 0, RELEASE_MINOR: 0, RELEASE_PATCH: 0}
-
-        versions['version'] = versions['version'].apply(lambda x: x.split('-')[0])
-        versions = versions.drop_duplicates()
-
-        versions['version_count'] = versions['version'].apply(lambda x: TechLag.convert_version(x))
-        versions.sort_values('version_count', ascending=True, inplace=True)
-
-        versions['version_old'] = versions['version'].shift(1)
-        versions['release_type'] = versions.apply(lambda d: TechLag.release_type(d['version_old'],
-                                                                                 d['version']),
-                                                  axis=1)
-        versions = versions.query('version_count>' + str(used) + ' and version_count <= ' + str(latest))
-
-        lag = versions.groupby('release_type').count()[['version']].to_dict()['version']
-
-        if RELEASE_MAJOR not in lag.keys():
-            lag[RELEASE_MAJOR] = 0
-        if RELEASE_MINOR not in lag.keys():
-            lag[RELEASE_MINOR] = 0
-        if RELEASE_PATCH not in lag.keys():
-            lag[RELEASE_PATCH] = 0
-
-        return lag
-
-    @staticmethod
-    def parse_url(url):
-        """Parse the URL of a remote package.json and return its content.
-
-        :param url: the url of a package.json
-
-        :return: the content of the package.json
-        """
-        response = requests.get(url)
-
         try:
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as error:
-            logging.error(error)
+            completed = subprocess.run(args, stdout=subprocess.PIPE)
+            output = completed.stdout.decode().strip()
+        except TypeError as e:
+            logger.error(e)
+            raise TechLagError(cause=e)
 
-        to_json = response.json()
-        return to_json
+        if completed.returncode == 0:
+            return output.split('\n')
+        elif completed.returncode == 1 and not output:
+            logger.warning("No package versions found for constraint %s and versions %s", constraint, versions)
+            return []
+        else:
+            logger.error(output)
+            raise TechLagError(cause=output)
 
     @staticmethod
     def convert_version(version):
@@ -246,10 +97,24 @@ class TechLag:
 
         :return: a numeric value of the package version
         """
-        version = version.split('.')
-        major = int(version[0]) * 1000000
-        minor = int(version[1]) * 1000
-        patch = int(version[2])
+        major = 0
+        minor = 0
+        patch = 0
+
+        prog = re.compile("^\d+(\.\d+)*$")
+        result = prog.match(version)
+
+        if not result:
+            msg = "Impossible to convert version %s" % version
+            raise TechLagError(cause=msg)
+
+        groups = version.split('.')
+        if len(groups) >= 1:
+            major = int(groups[0]) * 1000000
+        if len(groups) >= 2:
+            minor = int(groups[1]) * 1000
+        if len(groups) >= 3:
+            patch = int(groups[2])
 
         return major + minor + patch
 
@@ -257,7 +122,6 @@ class TechLag:
     def release_type(old_version, new_version):
         """Determine the type of a release by comparing two versions. The
         outcome can be: major, minor or patch.
-
 
         :param old_version: The source version of a package
         :param new_version: The target version of a package
@@ -274,3 +138,230 @@ class TechLag:
             release = RELEASE_MINOR
 
         return release
+
+    @staticmethod
+    def fetch_from_url(url):
+        """Fetch package information from a URL and return its content.
+
+        :param url: the target url
+
+        :return: the content of the url
+        """
+        response = requests.get(url)
+
+        try:
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as error:
+            logger.error(error)
+
+        to_json = response.json()
+        return to_json
+
+
+class TechLagCommand:
+    """Abstract class to run backends from the command line.
+
+    When the class is initialized, it parses the given arguments using
+    the defined argument parser on `setup_cmd_parser` method. Those
+    arguments will be stored in the attribute `parsed_args`.
+
+    The arguments will be used to inizialize and run the `Backend` object
+    assigned to this command. The backend used to run the command is stored
+    under `BACKEND` class attributed. Any class derived from this and must
+    set its own `Backend` class.
+
+    Moreover, the method `setup_cmd_parser` must be implemented to exectute
+    the backend.
+    """
+    BACKEND = None
+
+    def __init__(self, *args):
+        parser = self.setup_cmd_parser()
+        self.parsed_args = parser.parse(*args)
+
+    def run(self):
+        """Run the technical lag assessment.
+
+        This method runs the backend to analyze the technical lag.
+        """
+        backend_args = vars(self.parsed_args)
+        analyze(self.BACKEND, backend_args)
+
+    @staticmethod
+    def setup_cmd_parser():
+        raise NotImplementedError
+
+
+class TechLagCommandArgumentParser:
+    """Manage and parse backend command arguments.
+
+    This class defines and parses a set of arguments common to
+    backends commands.
+    """
+    def __init__(self):
+        self.parser = argparse.ArgumentParser()
+
+        group = self.parser.add_argument_group('general arguments')
+        group.add_argument('-p', '--package', dest='package', default=None,
+                           help="package name")
+        group.add_argument('-v', '--version', dest='version', default=None,
+                           help="package version")
+        group.add_argument('-u', '--url', dest='url', default=None,
+                           help="package URL")
+
+    def parse(self, *args):
+        """Parse a list of arguments.
+
+        Parse argument strings needed to run a backend command. The result
+        will be a `argparse.Namespace` object populated with the values
+        obtained after the validation of the parameters.
+
+        :param args: argument strings
+
+        :result: an object with the parsed values
+        """
+        parsed_args = self.parser.parse_args(args)
+
+        return parsed_args
+
+
+def analyze(backend_class, backend_args):
+    """RUn the analysis for given TechLag backend.
+
+    The parameters needed to initialize the `backend` class and
+    perform the analysis are given using `backend_args` dict parameter.
+
+    :param backend_class: backend class to analyze the technical lag
+    :param backend_args: dict of arguments needed to calculate
+    the technical lag
+
+    :returns: a panda DataFrame
+    """
+    init_args = find_signature_parameters(backend_class.__init__,
+                                          backend_args)
+
+    backend = backend_class(**init_args)
+
+    try:
+        analysis = backend.analyze()
+        print(analysis.to_json(orient='records', lines=True))
+    except Exception as e:
+        raise e
+
+    return analysis
+
+
+def find_signature_parameters(callable_, candidates,
+                              excluded=('self', 'cls')):
+    """Find on a set of candidates the parameters needed to execute a callable.
+
+    Returns a dictionary with the `candidates` found on `callable_`.
+    When any of the required parameters of a callable is not found,
+    it raises a `AttributeError` exception. A signature parameter
+    whitout a default value is considered as required.
+
+    :param callable_: callable object
+    :param candidates: dict with the possible parameters to use
+        with the callable
+    :param excluded: tuple with default parameters to exclude
+
+    :result: dict of parameters ready to use with the callable
+
+    :raises AttributeError: when any of the required parameters for
+        executing a callable is not found in `candidates`
+    """
+    signature_params = inspect_signature_parameters(callable_,
+                                                    excluded=excluded)
+    exec_params = {}
+
+    add_all = False
+    for param in signature_params:
+        name = param.name
+
+        if str(param).startswith('*'):
+            add_all = True
+        elif name in candidates:
+            exec_params[name] = candidates[name]
+        elif param.default == inspect.Parameter.empty:
+            msg = "required argument %s not found" % name
+            raise AttributeError(msg, name)
+        else:
+            continue
+
+    if add_all:
+        exec_params = candidates
+
+    return exec_params
+
+
+def inspect_signature_parameters(callable_, excluded=None):
+    """Get the parameters of a callable.
+
+    Returns a list with the signature parameters of `callable_`.
+    Parameters contained in `excluded` tuple will not be included
+    in the result.
+
+    :param callable_: callable object
+    :param excluded: tuple with default parameters to exclude
+
+    :result: list of parameters
+    """
+    if not excluded:
+        excluded = ()
+
+    signature = inspect.signature(callable_)
+    params = [
+        v for p, v in signature.parameters.items()
+        if p not in excluded
+    ]
+    return params
+
+
+def find_backends(top_package):
+    """Find available backends.
+
+    Look for the TechLag backends and commands under `top_package`
+    and its sub-packages. When `top_package` defines a namespace,
+    backends under that same namespace will be found too.
+
+    :param top_package: package storing backends
+
+    :returns: a tuple with two dicts: one with `Backend` classes and one
+        with `BackendCommand` classes
+    """
+    candidates = pkgutil.walk_packages(top_package.__path__,
+                                       prefix=top_package.__name__ + '.')
+
+    modules = [name for _, name, is_pkg in candidates if not is_pkg]
+
+    return _import_backends(modules)
+
+
+def _import_backends(modules):
+    for module in modules:
+        importlib.import_module(module)
+
+    bkls = _find_classes(TechLag, modules)
+    ckls = _find_classes(TechLagCommand, modules)
+
+    backends = {name: kls for name, kls in bkls}
+    commands = {name: klass for name, klass in ckls}
+
+    return backends, commands
+
+
+def _find_classes(parent, modules):
+    parents = parent.__subclasses__()
+
+    while parents:
+        kls = parents.pop()
+
+        m = kls.__module__
+
+        if m not in modules:
+            continue
+
+        name = m.split('.')[-1]
+        parents.extend(kls.__subclasses__())
+
+        yield name, kls
