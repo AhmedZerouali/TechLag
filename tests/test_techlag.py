@@ -22,35 +22,105 @@
 #     Valerio Cosentino <valcos@bitergia.com>
 #
 
+import os
+import httpretty
 import unittest
 
-from pytechlag.pytechlag import TechLag
-from pytechlag.errors import ParamsError
+from techlag.techlag import (logger,
+                             TechLag,
+                             RELEASE_MAJOR,
+                             RELEASE_MINOR,
+                             RELEASE_PATCH)
+from techlag.errors import TechLagError
+
+
+def read_file(filename, mode='r'):
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), filename), mode) as f:
+        content = f.read()
+    return content
 
 
 class TestTechLag(unittest.TestCase):
     """TechLag tests"""
 
-    def test_init_params(self):
+    def test_init(self):
         """Test whether the attributes are initialized"""
 
-        tl = TechLag(package="grunt", version="1.0.0", kind="dependencies")
+        tl = TechLag(url="https://...")
+        self.assertIsNone(tl.package)
+        self.assertIsNone(tl.version)
+        self.assertEqual(tl.url, "https://...")
+
+        tl = TechLag(package="grunt", version="1.0.0", url="https://...")
         self.assertEqual(tl.package, "grunt")
         self.assertEqual(tl.version, "1.0.0")
-        self.assertEqual(tl.kind, "dependencies")
+        self.assertEqual(tl.url, "https://...")
 
-        tl = TechLag(pjson="https://raw.githubusercontent.com/jasmine/jasmine/master/package.json", kind="devDependencies")
-        self.assertEqual(tl.pjson, "https://raw.githubusercontent.com/jasmine/jasmine/master/package.json")
-        self.assertEqual(tl.kind, "devDependencies")
+    def test_analyze(self):
+        """Test whether a NotImplementedError is thrown"""
 
-        with self.assertRaises(ParamsError):
-            TechLag(package="grunt", version="1.0.0")
+        tl = TechLag(package="grunt", version="1.0.0", url="https://...")
+        with self.assertRaises(NotImplementedError):
+            tl.analyze()
 
-        with self.assertRaises(ParamsError):
-            TechLag(package="grunt", version="1.0.0", kind="devDependencies", pjson="https://...")
+    def test_semserver(self):
+        """Test whether semserver properly works"""
 
-        with self.assertRaises(ParamsError):
-            TechLag(package="grunt", kind="devDependencies", pjson="https://...")
+        versions = TechLag.semver(">1.2.3", ["1.1.0", "1.2.0", "1.3.0", "1.4.0"])
+        self.assertEqual(["1.3.0", "1.4.0"], versions)
+
+        with self.assertLogs(logger, level='INFO') as cm:
+            versions = TechLag.semver(">1.2.3", ["1.1.0", "1.2.0"])
+            self.assertEqual([], versions)
+
+            self.assertEqual(cm.output[0], "WARNING:techlag.techlag:No package versions found for constraint "
+                                           ">1.2.3 and versions ['1.1.0', '1.2.0']")
+
+        with self.assertRaises(TechLagError):
+            _ = TechLag.semver(None, [])
+
+    def test_convert_version(self):
+        """Test whether convert_version properly works"""
+
+        value = TechLag.convert_version("1.1.1")
+        self.assertEqual(value, 1001001)
+
+        value = TechLag.convert_version("1.1")
+        self.assertEqual(value, 1001000)
+
+        value = TechLag.convert_version("1")
+        self.assertEqual(value, 1000000)
+
+        with self.assertRaises(TechLagError):
+            _ = TechLag.convert_version("")
+
+    def test_release_type(self):
+        """Test whether release_type properly works"""
+
+        release = TechLag.release_type("1.1.0", "2.2.1")
+        self.assertEqual(release, RELEASE_MAJOR)
+
+        release = TechLag.release_type("1.1.0", "1.2.1")
+        self.assertEqual(release, RELEASE_MINOR)
+
+        release = TechLag.release_type("1.1.1", "1.1.2")
+        self.assertEqual(release, RELEASE_PATCH)
+
+    @httpretty.activate
+    def test_fetch_from_url(self):
+        """Test whether fetch_from_url properly works"""
+
+        url = "https://raw.githubusercontent.com/jasmine/jasmine/master/package.json"
+        content = read_file('data/package.json', 'rb')
+        httpretty.register_uri(httpretty.GET,
+                               url,
+                               body=content,
+                               status=200)
+
+        response = TechLag.fetch_from_url(url)
+        self.assertEqual(response['name'], 'jasmine-core')
+        self.assertEqual(response['version'], '3.2.1')
+        self.assertIn('devDependencies', response)
 
 
 if __name__ == "__main__":
