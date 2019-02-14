@@ -1,6 +1,7 @@
 # TechLag: technical lag of your Javascript package
 
 TechLag is an utility that calculates how many updates your dependencies are missings.
+For now, TechLag only supports npm packages.
 
 ## Requirements
 - pandas>=0.22.0
